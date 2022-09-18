@@ -1,0 +1,636 @@
+---
+title: "bikedata"
+author: "EeshaA"
+date: '2022-07-04'
+output: html_document
+---
+
+```{r}
+bikedata<-read.csv("~/Desktop/AOSD-Report/NYC-BikeShare-2015-2017-combined.csv")
+View(bikedata)
+
+install.packages("tidyverse")
+library(tidyverse)
+
+bikedata
+bikedata2<-bikedata
+bikedata2
+bikedata2 <- rename(bikedata2,                         #rename column names to get rid of the space
+                    Slat = `Start.Station.Latitude`,
+                    Slon = `Start.Station.Longitude`,
+                    Elat = `End.Station.Latitude`,
+                    Elon = `End.Station.Longitude`,
+                    Sstid = `Start.Station.ID`,
+                    Estid = `End.Station.ID`,
+                    Estname = `End.Station.Name`,
+                    Sstname = `Start.Station.Name`)
+
+bikedata2
+
+````
+
+```{r}
+#Convert gender  and usertype to factor
+bikedata2$Gender <- factor(bikedata2$Gender, labels=c('Unknown', 'Male', 'Female')) 
+bikedata2$User.Type<- factor(bikedata2$User.Type)
+summary(bikedata2)
+
+
+````
+```{r}
+##protable#
+prop.table(table(bikedata2$User.Type))
+
+prop.table(table(bikedata2$Gender))
+
+prop.table(xtabs(~User.Type+Gender, data=bikedata2), margin=2)
+````
+```{r}
+#locatio#
+start_loc <- unique(bikedata2[,c('Slon', 'Slat', "Sstid", 'Sstname')]) %>% rename(Longitude = Slon, Latitude = Slat, Stid = Sstid, Stname=Sstname)
+end_loc <- unique(bikedata2[,c('Elon', 'Elat', 'Estid', 'Estname')]) %>% rename(Longitude = Elon, Latitude = Elat, Stid = Estid, Stname=Estname)
+station_loc <- unique(rbind(start_loc, end_loc))
+rm(start_loc, end_loc)
+````
+```{r}
+install.packages("leaflet")
+library(leaflet)
+
+interactivemap<- 
+  leaflet(station_loc) %>%
+  addProviderTiles(providers$Stamen.TonerHybrid, group = "Basemap") %>%
+  addProviderTiles(providers$Stamen.Terrain, group = "Basemap") %>%
+  addMarkers(label = paste(station_loc$Stid, station_loc$Longitude, station_loc$Latitude, station_loc$Stname, sep=",")
+  )
+install.packages("widgetframe")
+library(widgetframe)
+widgetframe::frameWidget(interactivemap)
+````
+```{r}
+(Bikedepots <- station_loc[grep(glob2rx("*CBS*"), station_loc$Stname),]$Stid)
+library(dplyr)
+
+bikedata2%>%
+  
+  dplyr::select(Sstid, Estid, Trip_Duration_in_min)%>%
+  filter(Trip_Duration_in_min >= 60*60*2)%>%
+  group_by(Sstid, Estid) %>%
+  summarise(triptots = n(),
+            averagetripdur = mean(Trip_Duration_in_min)
+  ) %>%
+  arrange(desc(triptots))
+
+#station_loc <- station_loc[!(station_loc$Stid %in% Bikedepots |  station_loc$Stid %in% eightDstations), ]
+bikedata2 <- bikedata2[bikedata2$Estid %in% station_loc$Stid & bikedata2$Sstid %in% station_loc$Stid, ]
+diffdesttrips <- bikedata2[bikedata2$Estid != bikedata2$Sstid, ]
+c(nrow(bikedata2), nrow(diffdesttrips))
+
+nrow(station_loc)
+summary(diffdesttrips)
+````
+```{r}
+install.packages("lubridate")
+library(lubridate)  #useful for date time functions
+
+numtrips_start_station <- diffdesttrips %>%
+  mutate(day_of_week = wday(Start.Time, label=TRUE, week_start=1)) %>% #create weekday variable from start time
+  group_by(Sstid, day_of_week, User.Type) %>%
+  summarise(Slon = first(Slon),
+            Slat = first(Slat),
+            totaltrips = n()
+  )
+
+numtrips_start_station %>%
+  arrange(desc(totaltrips))
+
+g1 <- ggplot(numtrips_start_station) +
+  geom_point(aes(x=Slon, y=Slat, size=totaltrips), alpha=.5) +  # We use thesize of the point to denote the attraction
+  scale_size_continuous(range= c(.1,2))+
+  facet_grid(User.Type ~ day_of_week) +  # Compare subscribers and customers
+  scale_x_continuous("", breaks=NULL)+
+  scale_y_continuous("", breaks=NULL)+
+  theme(panel.background = element_rect(fill='white',colour='white'), legend.position = "none")  + coord_fixed()
+install.packages("plotly")
+library(plotly)
+ggplotly(g1)
+
+numtrips_start_station <- diffdesttrips %>%
+  mutate(day_of_week = wday(Start.Time, label=TRUE, week_start=1)) %>%
+  group_by(Sstid, day_of_week) %>%
+  summarise(Slon = first(Slon),
+            Slat = first(Slat),
+            totaltrips = n()
+  ) %>%
+  group_by(day_of_week) %>%
+  mutate(
+    outlier_def = case_when(
+      totaltrips <= quantile(totaltrips,.07) ~ "Low",
+      totaltrips >= quantile(totaltrips, .85) ~ "High",
+      TRUE ~ "Normal"
+    )
+  )
+
+
+
+tmpfi <- numtrips_start_station %>% 
+  filter(outlier_def!="Normal")
+
+ggplot()+
+  geom_point(aes(x=Slon, y=Slat, color=factor(outlier_def)), alpha=.9, data=tmpfi)+
+  scale_color_brewer(palette="Dark2") + 
+  facet_wrap(~day_of_week, ncol=5)+
+  scale_x_continuous("", breaks=NULL)+
+  scale_y_continuous("", breaks=NULL)+
+  theme(panel.background = element_rect(fill='white',colour='white'), legend.position = "bottom") +
+  labs(colour = "Station Popularity")
+````
+```{r}
+install.packages("sf")
+library(sf)
+
+numtrips_start_station <- st_as_sf(numtrips_start_station, coords = c('Slon', 'Slat'), crs = 4326) # WGS84 coordinate system
+
+numtrips_start_station
+
+daytrips <-   numtrips_start_station[numtrips_start_station$day_of_week=="Tue",]
+center <- c((st_bbox(daytrips)$xmax+st_bbox(daytrips)$xmin)/2, (st_bbox(daytrips)$ymax+st_bbox(daytrips)$ymin)/2)
+names(center) <- NULL
+
+
+Npal <- colorNumeric(
+  palette = "Reds", n = 5,
+  domain = daytrips$totaltrips
+)
+
+m1 <-daytrips %>%
+  leaflet() %>%
+  setView(lng=center[1], lat=center[2], zoom=13) %>%
+  addProviderTiles(providers$Stamen.TonerLines, group = "Basemap") %>%
+  addProviderTiles(providers$Stamen.TonerLite, group = "Basemap") %>%
+  addCircles(
+    radius = (daytrips$totaltrips - mean(daytrips$totaltrips))/sd(daytrips$totaltrips) * 30,
+    fillOpacity = .6,
+    fillColor = Npal(daytrips$totaltrips),
+    group = 'Stations',
+    stroke=FALSE
+  ) %>%
+  addLegend("topleft", pal = Npal, values = ~totaltrips,
+            labFormat = function(type, cuts, p) {
+              n = length(cuts) 
+              paste0(prettyNum(cuts[-n],big.mark = ",", scientific=F), " - ", prettyNum(cuts[-1], digits=2, big.mark=",", scientific=F))
+            },
+            title = "Number of Trip Starts",
+            opacity = 1
+  )
+
+widgetframe::frameWidget(m1)
+````
+```{r}
+#####statistical analysis#####
+bikedata<-read.csv("~/Desktop/AOSD-Report/NYC-BikeShare-2015-2017-combined.csv")
+View(bikedata)
+newbikedata<-bikedata
+str(bikedata)
+newbikedata<-bikedata%>%
+  group_by(Start.Station.Name,End.Station.Name)
+unique(bikedata$Start.Station.Name)
+tail(newbikedata) 
+newbikedata$date_time<-as.POSIXct(newbikedata$Start.Time,tz=Sys.timezone())
+newbikedata$date_time2<-as.POSIXct(newbikedata$Stop.Time,tz=Sys.timezone())
+str(newbikedata$date_time)
+````
+```{r}
+##conversions#3
+newbikedata$Day<-format(newbikedata$date_time,"%d")
+newbikedata$Dayofweek <- format(newbikedata$date_time,"%a")
+newbikedata$month<-format(newbikedata$date_time,"%m")
+newbikedata$monthname<-format(newbikedata$date_time,"%b")
+newbikedata$year<-format(newbikedata$date_time,"%Y")
+newbikedata$Hour<-format(newbikedata$date_time,"%H")
+newbikedata$datey<-format(newbikedata$date_time,"%y-%m-%d")
+summarise(newbikedata)
+```
+```{r}
+newbikedata$date_time <- as.Date(newbikedata$date_time)
+class(newbikedata$date_time)
+ 
+head(newbikedata) #see the first 6 rows of the data frame
+nrow(newbikedata) #how many rows are in the data frame
+colnames(newbikedata) #list of column names
+dim(newbikedata) #dimensions of the data frame
+summary(newbikedata) #statistical summary of data, mainly for numerics
+str(newbikedata) #see list of columns and data types
+tail(newbikedata) #see the last 6 rows of the data frame
+````
+```{r}
+#Add a ride_length calculation to trip_data#
+newbikedata$start_time<- format(as.POSIXct(newbikedata$date_time),format = "%H:%M")
+newbikedata$end_time<- format(as.POSIXct(newbikedata$date_time2),format = "%H:%M")
+ 
+newbikedata$ride_length <- difftime(newbikedata$date_time2, newbikedata$date_time)
+str(newbikedata$ride_length)
+newbikedata$ride_length<-as.factor(as.character(newbikedata$ride_length))
+(newbikedata$ride_length)
+````
+```{r}
+#Add ride_distance calculation to trip_data#
+install.packages("dplyr")
+install.packages("geosphere")
+library(dplyr)
+library(geosphere)
+newbikedata$ride_distance<-distGeo(matrix(c(newbikedata$Start.Station.Longitude,newbikedata$Start.Station.Latitude),ncol = 2),
+                                matrix(c(newbikedata$End.Station.Longitude,newbikedata$End.Station.Latitude),ncol = 2))
+newbikedata$ride_distance <- newbikedata$ride_distance/1000 #distance in km
+#remove bad data#
+bike_clean <- newbikedata[!(newbikedata$ride_distance <= 0),]
+glimpse(bike_clean)
+````
+```{r}
+#outliers removal##
+
+
+iqr<-IQR(bike_clean$Trip.Duration)
+up<-quantile(bike_clean$Trip.Duration,0.75)+1.5*iqr
+low<-quantile(bike_clean$Trip.Duration,0.25)-1.5*iqr
+eliminated<-subset(bike_clean,bike_clean$Trip.Duration>low & bike_clean$Trip.Duration<up)
+summary(eliminated)
+
+iqr<-IQR(eliminated$ride_length)
+up<-quantile(as.numeric(eliminated$ride_length,0.75))+1.5*iqr
+low<-quantile(as.numeric(eliminated$ride_length,0.25))-1.5*iqr
+eliminated<-subset(eliminated,as.numeric(eliminated$ride_length)>low & as.numeric(eliminated$ride_length)<up)
+summary(eliminated)
+
+````
+```{r}
+install.packages("scales")
+install.packages("gridExtra")
+install.packages("ggthemes", dependencies = TRUE)
+library(scales)
+library(gridExtra)
+library(ggthemes)
+library(lubridate) # for working with dates
+library(ggplot2)
+library(tidyverse)
+
+eliminated %>%  
+  group_by(ride_distance, Hour) %>% 
+  summarise(number_of_rides = length(Start.Time), .groups="drop") %>% 
+  arrange(ride_distance, Hour) %>% 
+  ggplot(aes(x =Hour,  y = number_of_rides, fill= ride_distance)) +
+  labs(title ="Total rides Vs. Hour") +
+  geom_col(width=0.5, position = position_dodge(width=0.5)) +
+  scale_y_continuous(labels = function(x) format(x, scientific = FALSE))
+eliminated %>%  
+  group_by(Start.Station.Name,Dayofweek ) %>% 
+  summarise(number_of_rides = length(Bike.ID), .groups="drop") %>% 
+  arrange(Dayofweek, Start.Station.Name) %>% 
+  ggplot(aes(x =Dayofweek, y = number_of_rides)) +
+  labs(title ="Total Vs Dayofweek") +
+  geom_col(width=0.5, position = position_dodge(width=0.5)) +
+  theme(axis.text.x = element_text(angle = 90, vjust = 0.5))+
+  scale_y_continuous(labels = function(x) format(x, scientific = FALSE))
+eliminated %>%  
+  group_by(ride_distance, Start.Station.Name) %>% 
+  summarise(number_of_rides = length(Start.Time), .groups="drop") %>% 
+  arrange(ride_distance, Start.Station.Name) %>% 
+  ggplot(aes(x =Start.Station.Name,  y = number_of_rides, fill= ride_distance)) +
+  theme(axis.text.x = element_text(angle = 90, vjust = 0.5))+
+  labs(title ="Total rides Vs. Start stations") + 
+  geom_col(width=0.5, position = position_dodge(width=0.5)) +
+  scale_y_continuous(labels = function(x) format(x, scientific = FALSE))
+eliminated %>%  
+  group_by(ride_distance, End.Station.Name) %>% 
+  summarise(number_of_rides = length(Start.Time), .groups="drop") %>% 
+  arrange(ride_distance, End.Station.Name) %>% 
+  ggplot(aes(x =End.Station.Name,  y = number_of_rides, fill= ride_distance)) +
+  theme(axis.text.x = element_text(angle = 90, vjust = 0.5))+
+  labs(title ="Total rides Vs. End Station") +
+  geom_col(width=0.5, position = position_dodge(width=0.5)) +
+  scale_y_continuous(labels = function(x) format(x, scientific = FALSE))
+````
+```{r}
+###spatial and normalisation test###
+library(sf)
+datanor=data.frame(eliminated)
+datanor = st_as_sf(datanor, coords = c("Start.Station.Longitude", "Start.Station.Latitude"), crs = 3627)
+m=c("sunday","Monday","Tuesday","Thursday","Wednesday","Friday","Saturday")
+datanor$Dayofweek=factor(datanor$Dayofweek)
+summarise(datanor)
+
+write.csv(datanor,file = "analysisdata.csv")
+````
+```{r}
+####does the data follow a normal/gaussian distribution####
+install.packages("readxl")
+install.packages("rgeos")
+install.packages("gstat")
+
+################################################################################
+##################   INSTALL PACKAGES & LOAD LIBRARIES   #######################
+################################################################################
+
+# gstat: Spatial and Spatio-Temporal Geostatistical Modeling, Prediction and Simulation
+library(gstat)
+# sp: Classes and Methods for Spatial Data
+library(sp)
+# ggplot2: Create Elegant Data Visualizations Using the Grammar of Graphics
+library(ggplot2)
+# rgeos: Interface to Geometry Engine - Open Source ('GEOS')
+library(rgeos)
+# readxl: Read Excel Files
+library(readxl)
+
+################################################################################
+##################### LOAD DATA, VIEW DATA & STATISTICS ########################
+############################################################################
+View(eliminated)                   # open the table
+class(eliminated)                  # Type of variable
+Adf=eliminated                     # backup. Adf= data in data frame (DF).
+class(Adf)                # Type of variable
+View(Adf)                 # view data in a table
+names(Adf)                # view the name of the columns at the table
+head(Adf)                 # view the six first rows of information
+summary(Adf)              # view some statistics
+
+apply(Adf,2,var)          
+````
+```{r}
+################################################################################
+##################  HISTOGRAM AND FREQUENCY CURVE ##############################
+################################################################################
+ridenumber<-eliminated%>%
+  group_by(Start.Station.Name,End.Station.Name)%>%
+  summarise(number_of_rides=length(Start.Station.ID),.groups = "drop")
+
+interdata<-eliminated %>%  
+  group_by(Start.Station.Name,Start.Station.Latitude,Start.Station.Longitude,Hour) %>% 
+  summarise(number_of_rides = length(Start.Station.ID), .groups="drop")
+
+ggplot(interdata, aes(as.numeric(Hour)))+ 
+  geom_histogram(aes(), bins = 10, col=1, fill=8, alpha=.5) +
+  labs(x="Hour",y="count", title = "Histogram", 
+       subtitle="Raw Data") + 
+  theme(plot.title = element_text( face = "bold",size = 20,hjust =0.5,
+                                   color = "black")) + 
+  theme(axis.text = element_text(colour = "black", size =10, face = "bold")) +
+  theme(plot.subtitle=element_text(size=12, hjust=0.5, face="italic", 
+                                   color="black"))
+
+ggplot(Adf, aes(as.numeric(Hour)))+ 
+  geom_vline(aes(xintercept = mean(as.numeric(Hour)), color="Mean"), linetype="dashed",
+             size=1) + 
+  geom_vline(aes(xintercept = median(as.numeric(Hour)), color="Median"), linetype="dashed",
+             size=1)+
+  geom_density(col="#FF6666", alpha=.2, fill="#FF6666") +
+  labs(x= 'ride_count', y='Density')+
+  scale_color_manual(name = "Statistics", values = c(Median = "green", 
+                                                     Mean = "blue"))+
+  labs(x="Hour [m]",y="Density", title = "Density curve", 
+       subtitle="Raw Data, Mean, Median") + 
+  theme(plot.title = element_text(face = "bold", size = 20,hjust =0.5, 
+                                  color = "black")) + 
+  theme(axis.text = element_text(colour = "black", size =10, face = "bold"))+
+  theme(plot.subtitle=element_text(size=12, hjust=0.5, face="italic", 
+                                   color="black"))
+````
+```{r}
+
+################################################################################
+######################### NORMAL Q-Q PLOT ######################################
+################################################################################
+
+ggplot(data=interdata, aes(sample=as.numeric(Hour)))+ stat_qq_line(col="red", size=1.2)+ stat_qq()+
+  labs(x="Theoretical",y="Sample", title = "Normal Q-Q Plot", 
+       subtitle="Raw Data") + 
+  theme(plot.title = element_text( face = "bold",size = 20,hjust =0.5, 
+                                   color = "black")) + 
+  theme(axis.text = element_text(colour = "black", size =10, face = "bold"))+
+  theme(plot.subtitle=element_text(size=12, hjust=0.5, face="italic", 
+                                   color="black"))
+````
+```{r}
+################################################################################
+###########################  TEST FOR NORMALITY  ###############################
+###############################################################################
+#################  Kolmogorov-Smirnov TEST #####################################
+install.packages("nortest")
+library(nortest)
+lillie.test(as.numeric(interdata$Hour))
+# as p-value is less than 0.05 then we can assume  non normal distribution
+##we need to transform our data to get normality using box cox transformation##
+#data<-interdata[,1]
+#install.packages("AID")
+#library(AID)
+#install.packages("MASS")
+#library(MASS)
+
+#out <- boxcoxnc(as.factor(interdata), method = "mle", lambda = seq(-2,2,0.0001), verbose = F, plot = F)
+#out$lambda.hat
+#str(interdata)
+````
+```{r}
+################################################################################
+############################# Bubble Map #######################################
+################################################################################
+
+ggplot(interdata,aes(Start.Station.Longitude,Start.Station.Latitude)) + geom_point(aes(size=number_of_rides), color="RED", alpha=.8) +
+  labs(x="Easting",y="Northing", title = "Rides") +
+  theme(plot.title = element_text(face = "bold", size = 20,hjust =0.5,
+                                  color = "black")) +
+  theme (axis.text = element_text(colour = "black",size =10, face = "bold"))
+
+````
+```{r}
+################################################################################
+####################### Trend Analysis  ########################################
+################################################################################
+
+# trend analysis x Easting, lineal, second & third order
+x<-interdata$Start.Station.Longitude
+ggplot(interdata,aes(x,number_of_rides)) + 
+  geom_smooth(method = "lm", formula= y~x,se=F,size=1.2, aes(colour="Linear")) + 
+  geom_smooth(method = "lm", formula = y ~ poly(x, 2), se = F, size=1.2,
+              aes(colour="Second_Order")) + 
+  geom_smooth(method = "lm", formula = y ~ poly(x, 3), se = F, size=1.2,
+              aes(colour="Third_Order")) +
+  scale_color_manual(name = "Regresion Type", values = c(Linear = "red", 
+                                                         Second_Order = "blue", Third_Order = "green4"))+
+  labs(x="Easting [m]",y="number of rides [m]", title = "Scatter Plot", 
+       subtitle="GW vs x") + geom_point() +
+  theme(plot.title = element_text( face = "bold",size = 20,hjust =0.5, 
+                                   color = "black")) + 
+  theme(axis.text = element_text(colour = "black", size =10, face = "bold")) +
+  theme(plot.subtitle=element_text(size=12, hjust=0.5, face="italic", 
+                                   color="black")) 
+
+# trend analysis y Northing, lineal, second & third order
+y<-interdata$Start.Station.Latitude
+ggplot(interdata,aes(y,number_of_rides)) + 
+  geom_smooth(method = "lm", formula= y~x,se=F,size=1.2, aes(colour="Linear")) + 
+  geom_smooth(method = "lm", formula = y ~ poly(x, 2), se = F, size=1.2,
+              aes(colour="Second_Order")) + 
+  geom_smooth(method = "lm", formula = y ~ poly(x, 3), se = F, size=1.2,
+              aes(colour="Third_Order")) +
+  scale_color_manual(name = "Regresion Type", values = c(Linear = "red", 
+                                                         Second_Order = "blue", Third_Order = "green4"))+
+  labs(x="Northing [m]",y="rides [m]", title = "Scatter Plot", 
+       subtitle="GW vs y") + geom_point() +
+  theme(plot.title = element_text(face = "bold", 
+                                  size = 20,hjust =0.5, color = "black")) + 
+  theme(axis.text = element_text(colour = "black", size =10, face = "bold")) +
+  theme(plot.subtitle=element_text(size=12, hjust=0.5, face="italic", 
+                                   color="black")) 
+````
+```{r}
+################################################################################
+########################## 3D Model  ###########################################
+################################################################################
+
+#scatterplot3d: 3D Scatter Plot
+install.packages("scatterplot3d")
+library(scatterplot3d)
+scatterplot3d(interdata$Start.Station.Longitude,interdata$Start.Station.Latitude,interdata$number_of_rides, xlab="Easting",
+              ylab="Northing", zlab="rides")
+
+#rgl: 3D Visualization Using OpenGL
+install.packages("rgl")
+library(rgl)
+plot3d(interdata$Start.Station.Longitude,interdata$Start.Station.Latitude,interdata$number_of_rides, xlab="Easting",
+       ylab="Northing", zlab="number_of_rides", size=5, col="Red")
+````
+```{r}
+install.packages("arm")#
+install.packages("sjPlot")#
+install.packages("effects")#
+install.packages("lmtest")#
+install.packages("car")#
+install.packages("olsrr")#
+library(readr)
+library(ggplot2)
+library(arm)
+library(sjPlot)
+library(effects)
+library(lmtest)
+library(car)
+library(olsrr)
+ggplot(eliminated, aes(x =as.numeric(Hour ),fill=Dayofweek)) + 
+  geom_bar()
+ggplot(eliminated, aes(x =Dayofweek ),fill=Gender) + 
+  geom_bar()
+````
+```{r}
+###analysis###
+install.packages("ggmap")#
+library(ggplot2)
+library(ggthemes)
+library(dplyr)
+library(magrittr)
+library(data.table)
+library(stringr)
+# Fetching
+library(rvest)
+# Cleaning column names
+library(janitor)
+# Date/Time formatting
+library(lubridate)
+# Maps
+library(sf)
+library(ggmap)
+# Used for animated density plots
+ 
+
+eliminated$age <- 2016-eliminated$Birth.Year
+eliminated$age_bin <- eliminated$age %>% .bincode(seq(0,120,20))
+eliminated$age_bin <- sapply(eliminated$age_bin,function(bin) {
+  return(paste0((bin-1)*20,"-",(bin*20)," Years Old"))
+})
+
+
+
+ggplot(data=eliminated[which(eliminated$age<=60),], aes(x=month, fill=Dayofweek )) +
+  geom_bar( alpha=.9) + theme_fivethirtyeight() + ggtitle("Ride Frequency by Week of Year") + 
+  facet_grid(vars(Gender), vars(age_bin)) + scale_fill_viridis_d()
+ggsave(filename = "ride-frequecy-histogram.png",width = 8,units = "in")
+
+
+
+ggplot(data=eliminated[which(eliminated$age<=80),], aes(x=month ,fill= age_bin)) +
+  geom_bar(alpha=.9) + theme_fivethirtyeight() + ggtitle("Ride Distribution by month of Year") + 
+  geom_density(alpha=0,color=rgb(1,0,0,.4)) + 
+  facet_grid(vars(Gender), vars(age_bin)) + scale_fill_viridis_d()
+ggsave(filename = "ride-frequency-density.png",width = 8,units = "in")
+````
+```{r}
+###Density maps###
+
+ggplot(eliminated, aes(x = Start.Station.Longitude, y = Start.Station.Latitude))+ 
+  coord_equal()+ 
+  xlab('Longitude')+ 
+  ylab('Latitude')+ 
+  stat_density2d(aes(fill = ..level..), alpha = .5,
+                 h=.02,n=300,
+                 geom = "polygon", data = eliminated)+ 
+  scale_fill_viridis_c()+ 
+  theme(legend.position = 'none')
+ggplot(eliminated, aes(x =End.Station.Longitude , y = End.Station.Latitude))+ 
+  coord_equal()+ 
+  xlab('Longitude')+ 
+  ylab('Latitude')+ 
+  stat_density2d(aes(fill = ..level..), alpha = .5,
+                 h = .02, n = 300,
+                 geom = "polygon", data = eliminated)+ 
+  scale_fill_viridis_c()+ 
+  theme(legend.position = 'none')
+````
+```{r}
+###interpolation##
+install.packages("spatstat")
+install.packages("rasterVis")
+install.packages("crsmeta")
+install.packages("sp")
+install.packages("resample")
+install.packages("resampledata")
+install.packages("lmtest")
+library(sf)
+library(spatstat)
+library(raster)
+library(rasterVis)
+library(crsmeta)
+library(sp)
+library(resample)
+library(resampledata)
+library(lattice)
+library(lmtest)
+ 
+eliminateddup<-eliminated
+data=data.frame(eliminateddup)
+  
+ 
+```
+```{r}
+###point to grid##
+install.packages("RColorBrewer")
+library(RColorBrewer)
+library(raster)
+library(rasterVis)
+library(RColorBrewer)
+
+
+str(eliminateddup)
+data_coords <- cbind(eliminateddup$Start.Station.Longitude, eliminateddup$Start.Station.Latitude)
+
+
+names(eliminateddup) <- "data1"
+min(eliminateddup$Start.Station.Latitude)
+
+cell_size <- 0.0075
+lon_min <- -74.09694; lon_max <- -74.03211; lat_min <- 40.69264; lat_max <- 40.75256
+ncols <- ((lon_max - lon_min)/cell_size)+1; nrows <- ((lat_max - lat_min)/cell_size)+1 
+griddata <- raster(nrows=nrows, ncols=ncols, xmn=lon_min, xmx=lon_max, ymn=lat_min, ymx=lat_max, res=cell_size, crs="+proj=longlat +datum=WGS84")
+griddata
+
+data_grid <- rasterize(data_coords, griddata, fun=mean)
+data_grid
+plot(data_grid)
+````
